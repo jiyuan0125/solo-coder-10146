@@ -16,7 +16,6 @@ package com.google.api.client.util;
 
 import com.google.common.base.Strings;
 import java.io.Serializable;
-import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
@@ -41,27 +40,53 @@ public final class DateTime implements Serializable {
 
   private static final TimeZone GMT = TimeZone.getTimeZone("GMT");
 
-  /** Regular expression for parsing RFC3339 date/times. */
-  private static final String RFC3339_REGEX =
-      "(\\d{4})-(\\d{2})-(\\d{2})" // yyyy-MM-dd
-          + "([Tt](\\d{2}):(\\d{2}):(\\d{2})(\\.\\d{1,9})?)?" // 'T'HH:mm:ss.nanoseconds
-          + "([Zz]|([+-])(\\d{2}):(\\d{2}))?"; // 'Z' or time zone shift HH:mm following '+' or '-'
-
-  private static final Pattern RFC3339_PATTERN = Pattern.compile(RFC3339_REGEX);
+  // ---------------------------------------------------------------------------
+  // Internal Storage Layer
+  // ---------------------------------------------------------------------------
 
   /**
-   * Date/time value expressed as the number of ms since the Unix epoch.
+   * UTC milliseconds since Unix epoch (floor to millisecond).
    *
-   * <p>If the time zone is specified, this value is normalized to UTC, so to format this date/time
-   * value, the time zone shift has to be applied.
+   * <p>This value is always normalized to UTC. The time zone shift ({@link #tzShift}) is applied
+   * during formatting to produce the local time representation.
+   *
+   * <p>For sub-millisecond precision, see {@link #nanos}.
    */
   private final long value;
 
-  /** Specifies whether this is a date-only value. */
+  /** Whether this represents a date-only value (no time component). */
   private final boolean dateOnly;
 
-  /** Time zone shift from UTC in minutes or {@code 0} for date-only value. */
+  /**
+   * Time zone shift from UTC in minutes.
+   *
+   * <p>Only used for formatting; equality is based purely on the absolute UTC instant.
+   * For date-only values, this is always 0.
+   */
   private final int tzShift;
+
+  /**
+   * Nanosecond adjustment within the millisecond (0 to 999999 inclusive).
+   *
+   * <p>The full UTC instant is: {@code value} milliseconds + {@code nanos} nanoseconds
+   * since the Unix epoch.
+   *
+   * <p>For date-only values, this is always 0.
+   */
+  private final int nanos;
+
+  /**
+   * Number of fractional second digits to output when formatting (0 to 9 inclusive).
+   *
+   * <p>When parsing from a string, this preserves the original precision.
+   * When constructing via millisecond-level APIs, this defaults to 3 for backward compatibility.
+   * A value of 0 means no fractional seconds should be output.
+   */
+  private final int fracDigits;
+
+  // ---------------------------------------------------------------------------
+  // Public Constructors (API preserved exactly)
+  // ---------------------------------------------------------------------------
 
   /**
    * Instantiates {@link DateTime} from a {@link Date} and {@link TimeZone}.
@@ -70,7 +95,12 @@ public final class DateTime implements Serializable {
    * @param zone time zone; if {@code null}, it is interpreted as {@code TimeZone.getDefault()}.
    */
   public DateTime(Date date, TimeZone zone) {
-    this(false, date.getTime(), zone == null ? null : zone.getOffset(date.getTime()) / 60000);
+    this(
+        false,
+        date.getTime(),
+        zone == null ? null : zone.getOffset(date.getTime()) / 60000,
+        0,
+        3);
   }
 
   /**
@@ -82,7 +112,7 @@ public final class DateTime implements Serializable {
    * @param value number of milliseconds since the Unix epoch (January 1, 1970, 00:00:00 GMT)
    */
   public DateTime(long value) {
-    this(false, value, null);
+    this(false, value, null, 0, 3);
   }
 
   /**
@@ -105,7 +135,7 @@ public final class DateTime implements Serializable {
    * @param tzShift time zone, represented by the number of minutes off of UTC.
    */
   public DateTime(long value, int tzShift) {
-    this(false, value, tzShift);
+    this(false, value, tzShift, 0, 3);
   }
 
   /**
@@ -118,10 +148,7 @@ public final class DateTime implements Serializable {
    *     {@code TimeZone.getDefault()}.
    */
   public DateTime(boolean dateOnly, long value, Integer tzShift) {
-    this.dateOnly = dateOnly;
-    this.value = value;
-    this.tzShift =
-        dateOnly ? 0 : tzShift == null ? TimeZone.getDefault().getOffset(value) / 60000 : tzShift;
+    this(dateOnly, value, tzShift, 0, dateOnly ? 0 : 3);
   }
 
   /**
@@ -139,20 +166,51 @@ public final class DateTime implements Serializable {
    * @since 1.11
    */
   public DateTime(String value) {
-    // Note, the following refactoring is being considered: Move the implementation of parseRfc3339
-    // into this constructor. Implementation of parseRfc3339 can then do
-    // "return new DateTime(str);".
-    DateTime dateTime = parseRfc3339(value);
-    this.dateOnly = dateTime.dateOnly;
-    this.value = dateTime.value;
-    this.tzShift = dateTime.tzShift;
+    Rfc3339Parser.ParseResult result = Rfc3339Parser.parse(value);
+    this.dateOnly = result.dateOnly;
+    this.value = result.utcMillis;
+    this.tzShift = result.tzShift == null ? defaultTzShift(result.utcMillis, result.dateOnly) : result.tzShift;
+    this.nanos = result.nanos;
+    this.fracDigits = result.fracDigits;
   }
+
+  // ---------------------------------------------------------------------------
+  // Internal Constructor
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Internal constructor with all fields.
+   *
+   * @param dateOnly date-only flag
+   * @param value UTC milliseconds (floor)
+   * @param tzShift timezone shift in minutes, or null for default
+   * @param nanos sub-millisecond nanoseconds (0-999999)
+   * @param fracDigits number of fractional second digits to output
+   */
+  private DateTime(boolean dateOnly, long value, Integer tzShift, int nanos, int fracDigits) {
+    this.dateOnly = dateOnly;
+    this.value = value;
+    this.tzShift = dateOnly ? 0 : tzShift == null ? defaultTzShift(value, false) : tzShift;
+    this.nanos = dateOnly ? 0 : nanos;
+    this.fracDigits = dateOnly ? 0 : fracDigits;
+  }
+
+  private static int defaultTzShift(long value, boolean dateOnly) {
+    return dateOnly ? 0 : TimeZone.getDefault().getOffset(value) / 60000;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public Accessors (API preserved exactly)
+  // ---------------------------------------------------------------------------
 
   /**
    * Returns the date/time value expressed as the number of milliseconds since the Unix epoch.
    *
    * <p>If the time zone is specified, this value is normalized to UTC, so to format this date/time
    * value, the time zone shift has to be applied.
+   *
+   * <p>Note: sub-millisecond precision is truncated. Use
+   * {@link #parseRfc3339ToSecondsAndNanos(String)} for nanosecond precision.
    *
    * @since 1.5
    */
@@ -178,51 +236,13 @@ public final class DateTime implements Serializable {
     return tzShift;
   }
 
+  // ---------------------------------------------------------------------------
+  // Formatting
+  // ---------------------------------------------------------------------------
+
   /** Formats the value as an RFC 3339 date/time string. */
   public String toStringRfc3339() {
-    StringBuilder sb = new StringBuilder();
-    Calendar dateTime = new GregorianCalendar(GMT);
-    long localTime = value + (tzShift * 60000L);
-    dateTime.setTimeInMillis(localTime);
-    // date
-    appendInt(sb, dateTime.get(Calendar.YEAR), 4);
-    sb.append('-');
-    appendInt(sb, dateTime.get(Calendar.MONTH) + 1, 2);
-    sb.append('-');
-    appendInt(sb, dateTime.get(Calendar.DAY_OF_MONTH), 2);
-    if (!dateOnly) {
-      // time
-      sb.append('T');
-      appendInt(sb, dateTime.get(Calendar.HOUR_OF_DAY), 2);
-      sb.append(':');
-      appendInt(sb, dateTime.get(Calendar.MINUTE), 2);
-      sb.append(':');
-      appendInt(sb, dateTime.get(Calendar.SECOND), 2);
-
-      if (dateTime.isSet(Calendar.MILLISECOND)) {
-        sb.append('.');
-        appendInt(sb, dateTime.get(Calendar.MILLISECOND), 3);
-      }
-      // time zone
-      if (tzShift == 0) {
-        sb.append('Z');
-      } else {
-        int absTzShift = tzShift;
-        if (tzShift > 0) {
-          sb.append('+');
-        } else {
-          sb.append('-');
-          absTzShift = -absTzShift;
-        }
-
-        int tzHours = absTzShift / 60;
-        int tzMinutes = absTzShift % 60;
-        appendInt(sb, tzHours, 2);
-        sb.append(':');
-        appendInt(sb, tzMinutes, 2);
-      }
-    }
-    return sb.toString();
+    return Rfc3339Formatter.format(value, nanos, fracDigits, dateOnly, tzShift);
   }
 
   @Override
@@ -230,11 +250,18 @@ public final class DateTime implements Serializable {
     return toStringRfc3339();
   }
 
+  // ---------------------------------------------------------------------------
+  // Equality (based on absolute UTC instant, not timezone or precision representation)
+  // ---------------------------------------------------------------------------
+
   /**
    * {@inheritDoc}
    *
-   * <p>A check is added that the time zone is the same. If you ONLY want to check equality of time
-   * value, check equality on the {@link #getValue()}.
+   * <p>Equality is determined solely by the absolute UTC instant (including sub-millisecond
+   * precision) and the date-only flag. Time zone shift is not considered for equality — two
+   * DateTime objects representing the same instant in different timezones are considered equal.
+   * Pure precision differences (e.g. whether trailing zeros were preserved during formatting) do
+   * not affect equality.
    */
   @Override
   public boolean equals(Object o) {
@@ -245,13 +272,23 @@ public final class DateTime implements Serializable {
       return false;
     }
     DateTime other = (DateTime) o;
-    return dateOnly == other.dateOnly && value == other.value && tzShift == other.tzShift;
+    if (dateOnly != other.dateOnly) {
+      return false;
+    }
+    long thisTotalNanos = TimeUnit.MILLISECONDS.toNanos(value) + nanos;
+    long otherTotalNanos = TimeUnit.MILLISECONDS.toNanos(other.value) + other.nanos;
+    return thisTotalNanos == otherTotalNanos;
   }
 
   @Override
   public int hashCode() {
-    return Arrays.hashCode(new long[] {value, dateOnly ? 1 : 0, tzShift});
+    long totalNanos = TimeUnit.MILLISECONDS.toNanos(value) + nanos;
+    return Objects.hash(totalNanos, dateOnly);
   }
+
+  // ---------------------------------------------------------------------------
+  // Parsing
+  // ---------------------------------------------------------------------------
 
   /**
    * Parses an RFC3339 date/time value.
@@ -263,7 +300,9 @@ public final class DateTime implements Serializable {
    * NumberFormatException}. Also, in accordance with the RFC3339 standard, any number of
    * milliseconds digits is now allowed.
    *
-   * <p>Any time information beyond millisecond precision is truncated.
+   * <p>Sub-millisecond precision (up to 9 digits of fractional seconds) is preserved internally.
+   * Note that {@link #getValue()} truncates to millisecond precision; use
+   * {@link #parseRfc3339ToSecondsAndNanos(String)} for full nanosecond precision.
    *
    * <p>For the date-only case, the time zone is ignored and the hourOfDay, minute, second, and
    * millisecond parameters are set to zero.
@@ -274,7 +313,16 @@ public final class DateTime implements Serializable {
    *     time zone shift but no time.
    */
   public static DateTime parseRfc3339(String str) {
-    return parseRfc3339WithNanoSeconds(str).toDateTime();
+    Rfc3339Parser.ParseResult result = Rfc3339Parser.parse(str);
+    int resolvedTzShift = result.tzShift == null
+        ? defaultTzShift(result.utcMillis, result.dateOnly)
+        : result.tzShift;
+    return new DateTime(
+        result.dateOnly,
+        result.utcMillis,
+        resolvedTzShift,
+        result.nanos,
+        result.fracDigits);
   }
 
   /**
@@ -286,9 +334,20 @@ public final class DateTime implements Serializable {
    *     time zone shift but no time.
    */
   public static SecondsAndNanos parseRfc3339ToSecondsAndNanos(String str) {
-    Rfc3339ParseResult time = parseRfc3339WithNanoSeconds(str);
-    return time.toSecondsAndNanos();
+    Rfc3339Parser.ParseResult result = Rfc3339Parser.parse(str);
+    long totalNanos = TimeUnit.MILLISECONDS.toNanos(result.utcMillis) + result.nanos;
+    long seconds = totalNanos / 1_000_000_000L;
+    int nanos = (int) (totalNanos % 1_000_000_000L);
+    if (totalNanos < 0 && nanos != 0) {
+      seconds -= 1;
+      nanos += 1_000_000_000;
+    }
+    return new SecondsAndNanos(seconds, nanos);
   }
+
+  // ---------------------------------------------------------------------------
+  // Public nested class: SecondsAndNanos (API preserved exactly)
+  // ---------------------------------------------------------------------------
 
   /** A timestamp represented as the number of seconds and nanoseconds since Epoch. */
   public static final class SecondsAndNanos implements Serializable {
@@ -337,112 +396,208 @@ public final class DateTime implements Serializable {
     }
   }
 
-  /** Result of parsing an RFC 3339 string. */
-  private static class Rfc3339ParseResult implements Serializable {
-    private static final long serialVersionUID = 1L;
+  // ===========================================================================
+  // Private Layer 1: RFC3339 Parser
+  // ===========================================================================
 
-    private final long seconds;
-    private final int nanos;
-    private final boolean timeGiven;
-    private final Integer tzShift;
+  private static final class Rfc3339Parser {
 
-    private Rfc3339ParseResult(long seconds, int nanos, boolean timeGiven, Integer tzShift) {
-      this.seconds = seconds;
-      this.nanos = nanos;
-      this.timeGiven = timeGiven;
-      this.tzShift = tzShift;
-    }
+    private static final String RFC3339_REGEX =
+        "(\\d{4})-(\\d{2})-(\\d{2})"
+            + "([Tt](\\d{2}):(\\d{2}):(\\d{2})(\\.\\d{1,9})?)?"
+            + "([Zz]|([+-])(\\d{2}):(\\d{2}))?";
 
-    /**
-     * Convert this {@link Rfc3339ParseResult} to a {@link DateTime} with millisecond precision. Any
-     * fraction of a millisecond will be truncated.
-     */
-    private DateTime toDateTime() {
-      long seconds = TimeUnit.SECONDS.toMillis(this.seconds);
-      long nanos = TimeUnit.NANOSECONDS.toMillis(this.nanos);
-      return new DateTime(!timeGiven, seconds + nanos, tzShift);
-    }
+    private static final Pattern RFC3339_PATTERN = Pattern.compile(RFC3339_REGEX);
 
-    private SecondsAndNanos toSecondsAndNanos() {
-      return new SecondsAndNanos(seconds, nanos);
-    }
-  }
+    static final class ParseResult {
+      final long utcMillis;
+      final int nanos;
+      final int fracDigits;
+      final boolean dateOnly;
+      final Integer tzShift;
 
-  private static Rfc3339ParseResult parseRfc3339WithNanoSeconds(String str)
-      throws NumberFormatException {
-    Matcher matcher = RFC3339_PATTERN.matcher(str);
-    if (!matcher.matches()) {
-      throw new NumberFormatException("Invalid date/time format: " + str);
-    }
-
-    int year = Integer.parseInt(matcher.group(1)); // yyyy
-    int month = Integer.parseInt(matcher.group(2)) - 1; // MM
-    int day = Integer.parseInt(matcher.group(3)); // dd
-    boolean isTimeGiven = matcher.group(4) != null; // 'T'HH:mm:ss.milliseconds
-    String tzShiftRegexGroup = matcher.group(9); // 'Z', or time zone shift HH:mm following '+'/'-'
-    boolean isTzShiftGiven = tzShiftRegexGroup != null;
-    int hourOfDay = 0;
-    int minute = 0;
-    int second = 0;
-    int nanoseconds = 0;
-    Integer tzShiftInteger = null;
-
-    if (isTzShiftGiven && !isTimeGiven) {
-      throw new NumberFormatException(
-          "Invalid date/time format, cannot specify time zone shift"
-              + " without specifying time: "
-              + str);
-    }
-
-    if (isTimeGiven) {
-      hourOfDay = Integer.parseInt(matcher.group(5)); // HH
-      minute = Integer.parseInt(matcher.group(6)); // mm
-      second = Integer.parseInt(matcher.group(7)); // ss
-      if (matcher.group(8) != null) { // contains .nanoseconds?
-        String fraction = Strings.padEnd(matcher.group(8).substring(1), 9, '0');
-        nanoseconds = Integer.parseInt(fraction);
+      ParseResult(long utcMillis, int nanos, int fracDigits, boolean dateOnly, Integer tzShift) {
+        this.utcMillis = utcMillis;
+        this.nanos = nanos;
+        this.fracDigits = fracDigits;
+        this.dateOnly = dateOnly;
+        this.tzShift = tzShift;
       }
     }
-    Calendar dateTime = new GregorianCalendar(GMT);
-    dateTime.clear();
-    dateTime.set(year, month, day, hourOfDay, minute, second);
-    long value = dateTime.getTimeInMillis();
 
-    if (isTimeGiven && isTzShiftGiven) {
-      if (Character.toUpperCase(tzShiftRegexGroup.charAt(0)) != 'Z') {
-        int tzShift =
-            Integer.parseInt(matcher.group(11)) * 60 // time zone shift HH
-                + Integer.parseInt(matcher.group(12)); // time zone shift mm
-        if (matcher.group(10).charAt(0) == '-') { // time zone shift + or -
-          tzShift = -tzShift;
+    static ParseResult parse(String str) throws NumberFormatException {
+      Matcher matcher = RFC3339_PATTERN.matcher(str);
+      if (!matcher.matches()) {
+        throw new NumberFormatException("Invalid date/time format: " + str);
+      }
+
+      int year = Integer.parseInt(matcher.group(1));
+      int month = Integer.parseInt(matcher.group(2)) - 1;
+      int day = Integer.parseInt(matcher.group(3));
+      boolean isTimeGiven = matcher.group(4) != null;
+      String tzShiftRegexGroup = matcher.group(9);
+      boolean isTzShiftGiven = tzShiftRegexGroup != null;
+      int hourOfDay = 0;
+      int minute = 0;
+      int second = 0;
+      int nanoseconds = 0;
+      int fracDigits = 0;
+      Integer tzShiftInteger = null;
+
+      if (isTzShiftGiven && !isTimeGiven) {
+        throw new NumberFormatException(
+            "Invalid date/time format, cannot specify time zone shift"
+                + " without specifying time: "
+                + str);
+      }
+
+      if (isTimeGiven) {
+        hourOfDay = Integer.parseInt(matcher.group(5));
+        minute = Integer.parseInt(matcher.group(6));
+        second = Integer.parseInt(matcher.group(7));
+        if (matcher.group(8) != null) {
+          String fracRaw = matcher.group(8).substring(1);
+          fracDigits = fracRaw.length();
+          String padded = Strings.padEnd(fracRaw, 9, '0');
+          nanoseconds = Integer.parseInt(padded);
         }
-        value -= tzShift * 60000L; // e.g. if 1 hour ahead of UTC, subtract an hour to get UTC time
-        tzShiftInteger = tzShift;
-      } else {
-        tzShiftInteger = 0;
       }
+
+      Calendar dateTime = new GregorianCalendar(GMT);
+      dateTime.clear();
+      dateTime.set(year, month, day, hourOfDay, minute, second);
+      long localInstantMillis = dateTime.getTimeInMillis();
+
+      if (isTimeGiven && isTzShiftGiven) {
+        if (Character.toUpperCase(tzShiftRegexGroup.charAt(0)) != 'Z') {
+          int tzShift =
+              Integer.parseInt(matcher.group(11)) * 60
+                  + Integer.parseInt(matcher.group(12));
+          if (matcher.group(10).charAt(0) == '-') {
+            tzShift = -tzShift;
+          }
+          localInstantMillis -= tzShift * 60000L;
+          tzShiftInteger = tzShift;
+        } else {
+          tzShiftInteger = 0;
+        }
+      }
+
+      int subMillisNanos = nanoseconds % 1_000_000;
+      long utcMillis = localInstantMillis + (nanoseconds / 1_000_000);
+
+      return new ParseResult(utcMillis, subMillisNanos, fracDigits, !isTimeGiven, tzShiftInteger);
     }
-    // convert to seconds and nanoseconds
-    long secondsSinceEpoch = value / 1000L;
-    return new Rfc3339ParseResult(secondsSinceEpoch, nanoseconds, isTimeGiven, tzShiftInteger);
   }
 
-  /** Appends a zero-padded number to a string builder. */
-  private static void appendInt(StringBuilder sb, int num, int numDigits) {
-    if (num < 0) {
+  // ===========================================================================
+  // Private Layer 2: RFC3339 Formatter
+  // ===========================================================================
+
+  private static final class Rfc3339Formatter {
+
+    static String format(long utcMillis, int nanos, int fracDigits, boolean dateOnly, int tzShift) {
+      StringBuilder sb = new StringBuilder();
+      Calendar dateTime = new GregorianCalendar(GMT);
+      long localTime = utcMillis + (tzShift * 60000L);
+      dateTime.setTimeInMillis(localTime);
+
+      appendInt(sb, dateTime.get(Calendar.YEAR), 4);
       sb.append('-');
-      num = -num;
+      appendInt(sb, dateTime.get(Calendar.MONTH) + 1, 2);
+      sb.append('-');
+      appendInt(sb, dateTime.get(Calendar.DAY_OF_MONTH), 2);
+
+      if (!dateOnly) {
+        sb.append('T');
+        appendInt(sb, dateTime.get(Calendar.HOUR_OF_DAY), 2);
+        sb.append(':');
+        appendInt(sb, dateTime.get(Calendar.MINUTE), 2);
+        sb.append(':');
+        appendInt(sb, dateTime.get(Calendar.SECOND), 2);
+
+        int totalFracNanos = (dateTime.get(Calendar.MILLISECOND) * 1_000_000) + nanos;
+        int effectiveDigits = determineFractionDigits(totalFracNanos, fracDigits);
+
+        if (effectiveDigits > 0) {
+          sb.append('.');
+          appendFractionalNanos(sb, totalFracNanos, effectiveDigits);
+        }
+
+        if (tzShift == 0) {
+          sb.append('Z');
+        } else {
+          int absTzShift = tzShift;
+          if (tzShift > 0) {
+            sb.append('+');
+          } else {
+            sb.append('-');
+            absTzShift = -absTzShift;
+          }
+          int tzHours = absTzShift / 60;
+          int tzMinutes = absTzShift % 60;
+          appendInt(sb, tzHours, 2);
+          sb.append(':');
+          appendInt(sb, tzMinutes, 2);
+        }
+      }
+      return sb.toString();
     }
-    int x = num;
-    while (x > 0) {
-      x /= 10;
-      numDigits--;
+
+    private static int determineFractionDigits(int totalFracNanos, int parsedFracDigits) {
+      if (totalFracNanos == 0) {
+        return Math.max(parsedFracDigits, 3);
+      }
+      int minDigits = countMinimumDigits(totalFracNanos);
+      return Math.max(Math.max(parsedFracDigits, minDigits), 3);
     }
-    for (int i = 0; i < numDigits; i++) {
-      sb.append('0');
+
+    private static int countMinimumDigits(int totalFracNanos) {
+      int n = totalFracNanos;
+      int trailingZeros = 0;
+      while (n % 10 == 0 && trailingZeros < 9) {
+        n /= 10;
+        trailingZeros++;
+      }
+      return 9 - trailingZeros;
     }
-    if (num != 0) {
-      sb.append(num);
+
+    private static void appendFractionalNanos(StringBuilder sb, int totalFracNanos, int digits) {
+      int divisor = 1;
+      for (int i = digits; i < 9; i++) {
+        divisor *= 10;
+      }
+      int fracValue = totalFracNanos / divisor;
+      int x = fracValue;
+      int numDigits = 0;
+      while (x > 0) {
+        x /= 10;
+        numDigits++;
+      }
+      for (int i = numDigits; i < digits; i++) {
+        sb.append('0');
+      }
+      if (fracValue != 0) {
+        sb.append(fracValue);
+      }
+    }
+
+    private static void appendInt(StringBuilder sb, int num, int numDigits) {
+      if (num < 0) {
+        sb.append('-');
+        num = -num;
+      }
+      int x = num;
+      while (x > 0) {
+        x /= 10;
+        numDigits--;
+      }
+      for (int i = 0; i < numDigits; i++) {
+        sb.append('0');
+      }
+      if (num != 0) {
+        sb.append(num);
+      }
     }
   }
 }
