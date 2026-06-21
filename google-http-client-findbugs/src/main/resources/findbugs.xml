@@ -1,0 +1,12 @@
+<FindbugsPlugin xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation="findbugsplugin.xsd" pluginid="com.google.api.client.findbugs"
+  provider="Google APIs Client Library" website="https://github.com/googleapis/google-http-java-client">
+
+  <Detector class="com.google.api.client.findbugs.BetaDetector"
+    speed="fast"
+    reports="BETA_CLASS_USAGE,BETA_METHOD_USAGE,BETA_FIELD_USAGE" />
+  <BugPattern type="BETA_CLASS_USAGE" abbrev="GABU" category="BAD_PRACTICICE" />
+  <BugPattern type="BETA_METHOD_USAGE" abbrev="GABU"
+    category="BAD_PRACTICICE" />
+  <BugPattern type="BETA_FIELD_USAGE" abbrev="GABU" category="BAD_PRACTICICE" />
+</FindbugsPlugin>
