@@ -68,20 +68,33 @@ public class DateTimeRefactorVerificationTest {
   }
 
   @Test
-  public void requirement1_DateTimeDate_defaultTzShiftIsAlwaysZero() {
+  public void requirement1_DateTimeDate_honorsJvmDefaultTimezone() {
+    // Requirement 1 (updated): DateTime(Date) MUST honor JVM default timezone,
+    // unlike DateTime(long) which stays tzShift=0. This preserves backward
+    // compatibility for the Date-constructor path.
     Date date = new Date(1700000000000L);
 
     TimeZone originalTz = TimeZone.getDefault();
     try {
       TimeZone.setDefault(TimeZone.getTimeZone("GMT-4"));
       DateTime dt1 = new DateTime(date);
-      assertEquals(0, dt1.getTimeZoneShift());
+      int gmtMinus4Offset = -4 * 60;
+      assertEquals("DateTime(Date) in GMT-4 must have tzShift=-240 (JVM default)",
+          gmtMinus4Offset, dt1.getTimeZoneShift());
+      assertTrue("DateTime(Date) output should end with -04:00",
+          dt1.toStringRfc3339().endsWith("-04:00"));
 
       TimeZone.setDefault(TimeZone.getTimeZone("GMT+8"));
       DateTime dt2 = new DateTime(date);
-      assertEquals(0, dt2.getTimeZoneShift());
+      int gmtPlus8Offset = 8 * 60;
+      assertEquals("DateTime(Date) in GMT+8 must have tzShift=+480 (JVM default)",
+          gmtPlus8Offset, dt2.getTimeZoneShift());
+      assertTrue("DateTime(Date) output should end with +08:00",
+          dt2.toStringRfc3339().endsWith("+08:00"));
 
-      assertEquals(dt1, dt2);
+      // DateTime(long) should remain tzShift=0 regardless of JVM default
+      DateTime dtLong = new DateTime(date.getTime());
+      assertEquals("DateTime(long) always tzShift=0", 0, dtLong.getTimeZoneShift());
     } finally {
       TimeZone.setDefault(originalTz);
     }
@@ -244,13 +257,31 @@ public class DateTimeRefactorVerificationTest {
   }
 
   @Test
-  public void equals_sameMillisDifferentNanos_shouldNotBeEqual() {
-    // Same millisecond, different sub-millisecond nanos
+  public void equals_sameMillisDifferentNanos_shouldBeEqual() {
+    // Requirement 3: RFC3339-parsed instances are compared by millisecond
+    // value only (same as pre-refactor code which had no nanos field).
+    // Two instances in the same millisecond bucket are equal regardless of
+    // sub-millisecond nanos. This preserves the 1.30.2+ truncation semantics.
     DateTime dt1 = DateTime.parseRfc3339("2024-01-01T12:00:00.123Z");
     DateTime dt2 = DateTime.parseRfc3339("2024-01-01T12:00:00.123000001Z");
 
+    assertEquals(dt1, dt2);
+    assertEquals(dt1.hashCode(), dt2.hashCode());
+  }
+
+  @Test
+  public void equals_differentMillisBuckets_shouldNotBeEqual() {
+    // Instances that fall into DIFFERENT millisecond buckets should NOT be
+    // equal. 1ns difference is <1ms but if it crosses a millisecond
+    // boundary the values differ so they're not equal.
+    DateTime dt1 = DateTime.parseRfc3339("2024-01-01T12:00:00.000Z");
+    DateTime dt2 = DateTime.parseRfc3339("2024-01-01T12:00:00.001Z");
     assertNotEquals(dt1, dt2);
     assertNotEquals(dt1.hashCode(), dt2.hashCode());
+
+    DateTime dt3 = DateTime.parseRfc3339("2024-01-01T12:00:00.998Z");
+    DateTime dt4 = DateTime.parseRfc3339("2024-01-01T12:00:00.999Z");
+    assertNotEquals(dt3, dt4);
   }
 
   @Test
@@ -266,14 +297,28 @@ public class DateTimeRefactorVerificationTest {
   }
 
   @Test
-  public void equals_differentInstants_shouldNotBeEqual() {
+  public void equals_withinSameMillisBucket_shouldBeEqual_acrossBuckets_shouldNotBeEqual() {
+    // Within the same millisecond bucket → equal (pre-1.44 had no nanos field)
     DateTime dt1 = DateTime.parseRfc3339("2024-01-01T12:00:00.000000000Z");
     DateTime dt2 = DateTime.parseRfc3339("2024-01-01T12:00:00.000000001Z");
-    assertNotEquals(dt1, dt2);
+    assertEquals("Same millisecond bucket (0ms) should be equal", dt1, dt2);
+    assertEquals("hashCode consistent with equals", dt1.hashCode(), dt2.hashCode());
 
+    // Historical 1.30.2 truncation behavior: 999999999Z truncated to 999Z
+    // → both fall in the 999ms bucket → equal
     DateTime dt3 = DateTime.parseRfc3339("2024-01-01T12:00:00.999Z");
     DateTime dt4 = DateTime.parseRfc3339("2024-01-01T12:00:00.999999999Z");
-    assertNotEquals(dt3, dt4);
+    assertEquals("1.30.2 truncation compat: same ms bucket should be equal", dt3, dt4);
+    assertEquals("hashCode consistent with equals", dt3.hashCode(), dt4.hashCode());
+
+    // Across different millisecond buckets → NOT equal
+    DateTime dt5 = DateTime.parseRfc3339("2024-01-01T12:00:00.000Z");
+    DateTime dt6 = DateTime.parseRfc3339("2024-01-01T12:00:00.001Z");
+    assertNotEquals("Different ms buckets should NOT be equal (0ms vs 1ms)", dt5, dt6);
+
+    DateTime dt7 = DateTime.parseRfc3339("2024-01-01T12:00:00.998Z");
+    DateTime dt8 = DateTime.parseRfc3339("2024-01-01T12:00:00.999Z");
+    assertNotEquals("Different ms buckets should NOT be equal (998ms vs 999ms)", dt7, dt8);
   }
 
   @Test

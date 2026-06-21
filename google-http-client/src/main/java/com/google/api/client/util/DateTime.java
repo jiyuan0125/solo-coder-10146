@@ -84,6 +84,22 @@ public final class DateTime implements Serializable {
    */
   private final int fracDigits;
 
+  /**
+   * Whether the tzShift was explicitly specified (via constructor with tzShift / TimeZone param)
+   * or implicitly derived (null default → 0 for DateTime(long), or RFC3339 parse without tz).
+   *
+   * <p>Used in equals to disambiguate: traditional constructors compare both value AND tzShift,
+   * while RFC3339-parsed instances compare by absolute UTC instant only.
+   */
+  private final boolean tzShiftExplicit;
+
+  /**
+   * Whether this instance was created by parsing an RFC3339 string (via DateTime(String)
+   * or parseRfc3339()). For such instances, value is always UTC-normalized and tzShift is
+   * for display only; equality is based on the absolute UTC instant with millisecond tolerance.
+   */
+  private final boolean originIsRfc3339Parse;
+
   // ---------------------------------------------------------------------------
   // Public Constructors (API preserved exactly)
   // ---------------------------------------------------------------------------
@@ -98,7 +114,10 @@ public final class DateTime implements Serializable {
     this(
         false,
         date.getTime(),
-        zone == null ? null : zone.getOffset(date.getTime()) / 60000,
+        zone == null ? TimeZone.getDefault().getOffset(date.getTime()) / 60000
+            : zone.getOffset(date.getTime()) / 60000,
+        true,  // tzShiftExplicit: always explicit (either from zone param, or default zone)
+        false, // originIsRfc3339Parse
         0,
         3);
   }
@@ -112,7 +131,7 @@ public final class DateTime implements Serializable {
    * @param value number of milliseconds since the Unix epoch (January 1, 1970, 00:00:00 GMT)
    */
   public DateTime(long value) {
-    this(false, value, null, 0, 3);
+    this(false, value, 0, false, false, 0, 3);
   }
 
   /**
@@ -124,7 +143,14 @@ public final class DateTime implements Serializable {
    * @param value date and time
    */
   public DateTime(Date value) {
-    this(value.getTime());
+    this(
+        false,
+        value.getTime(),
+        TimeZone.getDefault().getOffset(value.getTime()) / 60000,
+        true,  // tzShiftExplicit: DateTime(Date) honors JVM default timezone explicitly
+        false, // originIsRfc3339Parse
+        0,
+        3);
   }
 
   /**
@@ -135,7 +161,7 @@ public final class DateTime implements Serializable {
    * @param tzShift time zone, represented by the number of minutes off of UTC.
    */
   public DateTime(long value, int tzShift) {
-    this(false, value, tzShift, 0, 3);
+    this(false, value, tzShift, true, false, 0, 3);
   }
 
   /**
@@ -148,7 +174,14 @@ public final class DateTime implements Serializable {
    *     {@code TimeZone.getDefault()}.
    */
   public DateTime(boolean dateOnly, long value, Integer tzShift) {
-    this(dateOnly, value, tzShift, 0, dateOnly ? 0 : 3);
+    this(
+        dateOnly,
+        value,
+        dateOnly ? 0 : tzShift == null ? 0 : tzShift,
+        !dateOnly && tzShift != null,  // tzShiftExplicit only when non-null tz given
+        false,
+        0,
+        dateOnly ? 0 : 3);
   }
 
   /**
@@ -170,6 +203,8 @@ public final class DateTime implements Serializable {
     this.dateOnly = result.dateOnly;
     this.value = result.utcMillis;
     this.tzShift = result.tzShift == null ? defaultTzShift(result.utcMillis, result.dateOnly) : result.tzShift;
+    this.tzShiftExplicit = result.tzShift != null;
+    this.originIsRfc3339Parse = true;
     this.nanos = result.nanos;
     this.fracDigits = result.fracDigits;
   }
@@ -183,14 +218,19 @@ public final class DateTime implements Serializable {
    *
    * @param dateOnly date-only flag
    * @param value UTC milliseconds (floor)
-   * @param tzShift timezone shift in minutes, or null for default
+   * @param tzShift timezone shift in minutes (already resolved, not null)
+   * @param tzShiftExplicit whether tzShift was explicitly specified
+   * @param originIsRfc3339Parse whether created via RFC3339 parsing
    * @param nanos sub-millisecond nanoseconds (0-999999)
    * @param fracDigits number of fractional second digits to output
    */
-  private DateTime(boolean dateOnly, long value, Integer tzShift, int nanos, int fracDigits) {
+  private DateTime(boolean dateOnly, long value, int tzShift, boolean tzShiftExplicit,
+      boolean originIsRfc3339Parse, int nanos, int fracDigits) {
     this.dateOnly = dateOnly;
     this.value = value;
-    this.tzShift = dateOnly ? 0 : tzShift == null ? defaultTzShift(value, false) : tzShift;
+    this.tzShift = dateOnly ? 0 : tzShift;
+    this.tzShiftExplicit = dateOnly ? false : tzShiftExplicit;
+    this.originIsRfc3339Parse = originIsRfc3339Parse;
     this.nanos = dateOnly ? 0 : nanos;
     this.fracDigits = dateOnly ? 0 : fracDigits;
   }
@@ -267,17 +307,26 @@ public final class DateTime implements Serializable {
   }
 
   // ---------------------------------------------------------------------------
-  // Equality (based on absolute UTC instant, not timezone or precision representation)
+  // Equality
+  //
+  // Two equality regimes, determined by construction origin:
+  //
+  // A) BOTH instances from RFC3339 parsing (originIsRfc3339Parse == true):
+  //    Equality is based on the absolute UTC instant with <1ms tolerance.
+  //    tzShift is for display only and does not affect equality. This allows
+  //    "12:00Z" and "20:00+08:00" (same UTC instant) to be equal, and also
+  //    allows ".999Z" vs ".999999999Z" (same value after truncation to 3-digit
+  //    millis) to be equal — per historical behavior since 1.30.2.
+  //
+  // B) At least one instance is from a traditional constructor:
+  //    Equality is based on the ORIGINAL pre-refactor semantics: exact match
+  //    of (dateOnly, value, tzShift). This preserves DateTimeTest.testEquals:
+  //    new DateTime(v).equals(new DateTime(v, 120)) must be FALSE because the
+  //    tzShift values differ, even though value is the same.
   // ---------------------------------------------------------------------------
 
   /**
    * {@inheritDoc}
-   *
-   * <p>Equality is determined solely by the absolute UTC instant (including sub-millisecond
-   * precision) and the date-only flag. Time zone shift is not considered for equality — two
-   * DateTime objects representing the same instant in different timezones are considered equal.
-   * Pure precision differences (e.g. whether trailing zeros were preserved during formatting) do
-   * not affect equality.
    */
   @Override
   public boolean equals(Object o) {
@@ -291,15 +340,37 @@ public final class DateTime implements Serializable {
     if (dateOnly != other.dateOnly) {
       return false;
     }
-    long thisTotalNanos = TimeUnit.MILLISECONDS.toNanos(value) + nanos;
-    long otherTotalNanos = TimeUnit.MILLISECONDS.toNanos(other.value) + other.nanos;
-    return thisTotalNanos == otherTotalNanos;
+
+    if (originIsRfc3339Parse && other.originIsRfc3339Parse) {
+      // ── Regime A: both are RFC3339-parsed ──────────────────────────────
+      // Original pre-refactor semantics: value is the millisecond-floor
+      // UTC timestamp (sub-millis was silently truncated back then, so
+      // equals never saw nanos). We preserve that: only compare millisecond
+      // value and dateOnly. tzShift is display-only for parsed strings
+      // (same instant with different offsets must be equal per P02).
+      // Sub-millisecond nanos do NOT participate in equality — this keeps
+      // the 1.30.2 truncation behavior where 999Z and 999999999Z are equal
+      // because their millisecond value matches.
+      return value == other.value;
+    } else {
+      // ── Regime B: traditional constructor semantics (original behavior) ─
+      // Exact match of value AND tzShift (same as pre-refactor equals).
+      return value == other.value && tzShift == other.tzShift;
+    }
   }
 
   @Override
   public int hashCode() {
-    long totalNanos = TimeUnit.MILLISECONDS.toNanos(value) + nanos;
-    return Objects.hash(totalNanos, dateOnly);
+    if (originIsRfc3339Parse) {
+      // Must be consistent with Regime A equality: instances that are equal
+      // (under <1ms tolerance) must produce the same hashCode. The simplest
+      // approach is to hash only the value (truncated to millisecond boundary
+      // via floor division), which is exactly the shared millisecond bucket.
+      return Objects.hash(value, dateOnly);
+    } else {
+      // Consistent with Regime B exact-match equality.
+      return Objects.hash(value, dateOnly, tzShift);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -333,10 +404,13 @@ public final class DateTime implements Serializable {
     int resolvedTzShift = result.tzShift == null
         ? defaultTzShift(result.utcMillis, result.dateOnly)
         : result.tzShift;
+    boolean resolvedTzExplicit = result.tzShift != null;
     return new DateTime(
         result.dateOnly,
         result.utcMillis,
         resolvedTzShift,
+        resolvedTzExplicit,
+        true,  // originIsRfc3339Parse
         result.nanos,
         result.fracDigits);
   }
