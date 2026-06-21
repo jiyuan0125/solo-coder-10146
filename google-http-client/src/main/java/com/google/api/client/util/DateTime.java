@@ -196,7 +196,7 @@ public final class DateTime implements Serializable {
   }
 
   private static int defaultTzShift(long value, boolean dateOnly) {
-    return dateOnly ? 0 : TimeZone.getDefault().getOffset(value) / 60000;
+    return 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -240,9 +240,25 @@ public final class DateTime implements Serializable {
   // Formatting
   // ---------------------------------------------------------------------------
 
-  /** Formats the value as an RFC 3339 date/time string. */
+  /**
+   * Formats the value as an RFC 3339 date/time string with exactly 3 digits of fractional
+   * seconds (millisecond precision), for backwards compatibility. Any sub-millisecond precision is
+   * truncated.
+   */
   public String toStringRfc3339() {
-    return Rfc3339Formatter.format(value, nanos, fracDigits, dateOnly, tzShift);
+    return Rfc3339Formatter.format(value, nanos, 3, dateOnly, tzShift, false);
+  }
+
+  /**
+   * Formats the value as an RFC 3339 date/time string with variable precision: for millisecond
+   * precision values, outputs exactly 3 digits of fractional seconds; for sub-millisecond
+   * precision values, outputs up to 9 digits of fractional seconds with no trailing zero
+   * truncation.
+   *
+   * @since 1.44
+   */
+  public String toStringRfc3339Nano() {
+    return Rfc3339Formatter.format(value, nanos, fracDigits, dateOnly, tzShift, true);
   }
 
   @Override
@@ -496,7 +512,13 @@ public final class DateTime implements Serializable {
 
   private static final class Rfc3339Formatter {
 
-    static String format(long utcMillis, int nanos, int fracDigits, boolean dateOnly, int tzShift) {
+    static String format(
+        long utcMillis,
+        int nanos,
+        int fracDigits,
+        boolean dateOnly,
+        int tzShift,
+        boolean highPrecision) {
       StringBuilder sb = new StringBuilder();
       Calendar dateTime = new GregorianCalendar(GMT);
       long localTime = utcMillis + (tzShift * 60000L);
@@ -516,12 +538,21 @@ public final class DateTime implements Serializable {
         sb.append(':');
         appendInt(sb, dateTime.get(Calendar.SECOND), 2);
 
-        int totalFracNanos = (dateTime.get(Calendar.MILLISECOND) * 1_000_000) + nanos;
-        int effectiveDigits = determineFractionDigits(totalFracNanos, fracDigits);
+        int millis = dateTime.get(Calendar.MILLISECOND);
+        int effectiveDigits;
+        int fracNanosForOutput;
+
+        if (highPrecision) {
+          fracNanosForOutput = millis * 1_000_000 + nanos;
+          effectiveDigits = determineHighPrecisionDigits(fracNanosForOutput, fracDigits);
+        } else {
+          fracNanosForOutput = millis * 1_000_000;
+          effectiveDigits = 3;
+        }
 
         if (effectiveDigits > 0) {
           sb.append('.');
-          appendFractionalNanos(sb, totalFracNanos, effectiveDigits);
+          appendFractionalNanos(sb, fracNanosForOutput, effectiveDigits);
         }
 
         if (tzShift == 0) {
@@ -544,9 +575,12 @@ public final class DateTime implements Serializable {
       return sb.toString();
     }
 
-    private static int determineFractionDigits(int totalFracNanos, int parsedFracDigits) {
+    private static int determineHighPrecisionDigits(int totalFracNanos, int parsedFracDigits) {
       if (totalFracNanos == 0) {
-        return Math.max(parsedFracDigits, 3);
+        return 3;
+      }
+      if (parsedFracDigits <= 3) {
+        return 3;
       }
       int minDigits = countMinimumDigits(totalFracNanos);
       return Math.max(Math.max(parsedFracDigits, minDigits), 3);

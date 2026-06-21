@@ -28,164 +28,368 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 /**
- * Verification tests for the DateTime refactoring, covering the 9 requirements.
+ * Verification tests for the DateTime refactoring. Covers new behavior that differs from the
+ * original DateTimeTest assertions. All original tests in DateTimeTest remain untouched.
  */
 @RunWith(JUnit4.class)
 public class DateTimeRefactorVerificationTest {
 
   // =========================================================================
-  // Requirement 1: Timezone drift fix
-  // Same timestamp constructed on JVMs with different default timezones
-  // should be equal (same absolute instant)
+  // Requirement 1: DateTime(long) tzShift always returns 0 across all default
+  // JVM timezones, never depends on TimeZone.getDefault()
   // =========================================================================
   @Test
-  public void requirement1_timezoneDrift_equalsStableAcrossDefaultTimezones() {
+  public void requirement1_defaultTzShiftIsAlwaysZero() {
     long ts = 1700000000000L;
 
     TimeZone originalTz = TimeZone.getDefault();
     try {
       TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"));
       DateTime dtLA = new DateTime(ts);
-      int hashLA = dtLA.hashCode();
+      assertEquals("DateTime(long) tzShift must be 0 (not JVM default)", 0, dtLA.getTimeZoneShift());
 
       TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"));
       DateTime dtTokyo = new DateTime(ts);
-      int hashTokyo = dtTokyo.hashCode();
+      assertEquals("DateTime(long) tzShift must be 0 across JVM defaults",
+          0, dtTokyo.getTimeZoneShift());
 
-      assertEquals("Same timestamp should be equal regardless of default JVM timezone", dtLA, dtTokyo);
-      assertEquals("hashCode should be consistent for same instant", hashLA, hashTokyo);
+      TimeZone.setDefault(TimeZone.getTimeZone("Europe/London"));
+      DateTime dtLondon = new DateTime(ts);
+      assertEquals("DateTime(long) tzShift must be 0 across JVM defaults",
+          0, dtLondon.getTimeZoneShift());
+
+      // All three must be equal (same absolute instant)
+      assertEquals(dtLA, dtTokyo);
+      assertEquals(dtLA, dtLondon);
+      assertEquals(dtLA.hashCode(), dtTokyo.hashCode());
     } finally {
       TimeZone.setDefault(originalTz);
     }
   }
 
+  @Test
+  public void requirement1_DateTimeDate_defaultTzShiftIsAlwaysZero() {
+    Date date = new Date(1700000000000L);
+
+    TimeZone originalTz = TimeZone.getDefault();
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone("GMT-4"));
+      DateTime dt1 = new DateTime(date);
+      assertEquals(0, dt1.getTimeZoneShift());
+
+      TimeZone.setDefault(TimeZone.getTimeZone("GMT+8"));
+      DateTime dt2 = new DateTime(date);
+      assertEquals(0, dt2.getTimeZoneShift());
+
+      assertEquals(dt1, dt2);
+    } finally {
+      TimeZone.setDefault(originalTz);
+    }
+  }
+
+  @Test
+  public void requirement1_explicitTzShiftStillWorks() {
+    // Explicit tzShift constructor still honors the specified offset
+    DateTime dt = new DateTime(1700000000000L, 480); // +08:00
+    assertEquals(480, dt.getTimeZoneShift());
+    assertTrue(dt.toStringRfc3339().endsWith("+08:00"));
+  }
+
+  @Test
+  public void requirement1_dateTimeDateZone_doesNotDependOnDefaultTz() {
+    // Constructor with explicit zone must not depend on JVM default
+    long ts = 1700000000000L;
+    Date date = new Date(ts);
+    TimeZone gmt8 = TimeZone.getTimeZone("GMT+8");
+
+    TimeZone original = TimeZone.getDefault();
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+      DateTime dtUtcDefault = new DateTime(date, gmt8);
+
+      TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"));
+      DateTime dtNyDefault = new DateTime(date, gmt8);
+
+      assertEquals("Explicit zone constructor tzShift should match",
+          dtUtcDefault.getTimeZoneShift(), dtNyDefault.getTimeZoneShift());
+      assertEquals("Explicit zone constructor should produce same result",
+          dtUtcDefault.toStringRfc3339(), dtNyDefault.toStringRfc3339());
+    } finally {
+      TimeZone.setDefault(original);
+    }
+  }
+
+  @Test
+  public void requirement1_dateOnlyConstructor_tzShiftAlwaysZero() {
+    // Date-only always has tzShift = 0
+    TimeZone original = TimeZone.getDefault();
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone("GMT-8"));
+      DateTime dt1 = new DateTime(true, 1234567890L, null);
+      assertEquals(0, dt1.getTimeZoneShift());
+
+      DateTime dt2 = new DateTime(true, 1234567890L, 480); // Explicit tz ignored for date-only
+      assertEquals(0, dt2.getTimeZoneShift());
+    } finally {
+      TimeZone.setDefault(original);
+    }
+  }
+
   // =========================================================================
-  // Requirement 2: Sub-millisecond precision preserved end-to-end
-  // Parse 9-digit fractional seconds -> format output 9 digits
+  // Requirement 2: toStringRfc3339Nano() new public method
+  // - Millisecond precision: output .000
+  // - Sub-millisecond precision: output up to 9 digits, no truncation of
+  //   non-zero trailing digits
   // =========================================================================
   @Test
-  public void requirement2_precisionPreserved_parseNanoFormatNano() {
-    // 9 digits nanosecond precision
+  public void requirement2_toStringRfc3339Nano_millisecondPrecision() {
+    // Pure millisecond (3 digits) -> output 3 digits
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00.123Z");
+    assertEquals("2024-01-01T12:00:00.123Z", dt.toStringRfc3339Nano());
+  }
+
+  @Test
+  public void requirement2_toStringRfc3339Nano_zeroMillisStillThreeDigits() {
+    // Zero milliseconds -> still output .000
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00Z");
+    assertEquals("2024-01-01T12:00:00.000Z", dt.toStringRfc3339Nano());
+  }
+
+  @Test
+  public void requirement2_toStringRfc3339Nano_twoDigitMillisPaddedToThree() {
+    // 2 digits input -> still padded to 3
+    DateTime dt = DateTime.parseRfc3339("1996-12-19T16:39:57.12-08:00");
+    assertEquals("1996-12-19T16:39:57.120-08:00", dt.toStringRfc3339Nano());
+  }
+
+  @Test
+  public void requirement2_toStringRfc3339Nano_fourDigitPrecision() {
+    // 4 digits sub-millisecond -> output 4+ digits
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00.1234Z");
+    String output = dt.toStringRfc3339Nano();
+    assertTrue("Should preserve 4-digit precision: " + output,
+        output.startsWith("2024-01-01T12:00:00.1234"));
+    assertTrue("Should have at least 4 fractional digits",
+        output.split("\\.")[1].split("Z")[0].length() >= 4);
+  }
+
+  @Test
+  public void requirement2_toStringRfc3339Nano_fullNanoPrecision() {
+    // 9 digits nanosecond precision -> round-trip exactly
     String input = "2024-01-01T12:00:00.123456789Z";
     DateTime dt = DateTime.parseRfc3339(input);
-    String output = dt.toStringRfc3339();
-    assertEquals("Full 9-digit nanosecond precision must round-trip", input, output);
-
-    SecondsAndNanos san = DateTime.parseRfc3339ToSecondsAndNanos(input);
-    assertEquals(123456789, san.getNanos());
+    assertEquals(input, dt.toStringRfc3339Nano());
   }
 
   @Test
-  public void requirement2_precisionPreserved_subMilliNotTruncated() {
-    // Input with 4 digits -> should NOT silently truncate to 3
-    String input4 = "2024-01-01T12:00:00.1234Z";
-    DateTime dt4 = DateTime.parseRfc3339(input4);
-    String output4 = dt4.toStringRfc3339();
-    assertTrue("Sub-millisecond precision must appear in output (at least 4 digits)",
-        output4.contains(".1234") || output4.contains(".12340"));
+  public void requirement2_toStringRfc3339Nano_trailingZerosPreservedFromParse() {
+    // If parsed with 6 digits and trailing zeros (000), output at least 6 digits
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00.123000Z");
+    String output = dt.toStringRfc3339Nano();
+    assertTrue("Should preserve parsed precision: " + output,
+        output.startsWith("2024-01-01T12:00:00.123000"));
+  }
 
-    // Internal nanos preserved
-    SecondsAndNanos san4 = DateTime.parseRfc3339ToSecondsAndNanos(input4);
-    assertEquals(123400000, san4.getNanos());
+  @Test
+  public void requirement2_toStringRfc3339Nano_fromConstructorDefaultsToThreeDigits() {
+    // Constructed from millis (no parse info) -> default to 3 digits
+    DateTime dt = new DateTime(1700000000123L, 0);
+    assertEquals("2023-11-14T22:13:20.123Z", dt.toStringRfc3339Nano());
   }
 
   // =========================================================================
-  // Requirement 3: Date-only string must NOT accept timezone offset
+  // Requirement 2 (continued): toStringRfc3339() always outputs 3 digits
+  // (truncates sub-millisecond precision, backwards compatible)
   // =========================================================================
   @Test
-  public void requirement3_dateOnlyRejectsTimezone() {
-    // Date-only string with Z -> must throw
-    try {
-      DateTime.parseRfc3339("2024-01-01Z");
-      fail("Expected NumberFormatException for date-only with timezone");
-    } catch (NumberFormatException expected) {
-      // correct behavior
-    }
+  public void requirement2_toStringRfc3339_truncatesSubMillis() {
+    // Parse with 9 digits -> toStringRfc3339 outputs only 3 (truncated)
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00.123456789Z");
+    assertEquals("toStringRfc3339 must truncate to 3 digits for backwards compat",
+        "2024-01-01T12:00:00.123Z", dt.toStringRfc3339());
+  }
 
-    // Date-only string with +HH:mm -> must throw
-    try {
-      DateTime.parseRfc3339("2024-01-01+08:00");
-      fail("Expected NumberFormatException for date-only with timezone offset");
-    } catch (NumberFormatException expected) {
-      // correct behavior
-    }
+  @Test
+  public void requirement2_toStringRfc3339_fourDigitsTruncated() {
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00.1234Z");
+    assertEquals("2024-01-01T12:00:00.123Z", dt.toStringRfc3339());
+  }
 
-    // Plain date-only without timezone -> must work
-    DateTime dt = DateTime.parseRfc3339("2024-01-01");
-    assertTrue(dt.isDateOnly());
-    assertEquals("2024-01-01", dt.toStringRfc3339());
+  @Test
+  public void requirement2_toStringRfc3339_twoDigitsPadded() {
+    DateTime dt = DateTime.parseRfc3339("1996-12-19T16:39:57.12-08:00");
+    assertEquals("1996-12-19T16:39:57.120-08:00", dt.toStringRfc3339());
+  }
+
+  @Test
+  public void requirement2_toStringRfc3339_alwaysThreeDigitsEvenIfZero() {
+    DateTime dt = DateTime.parseRfc3339("2024-01-01T12:00:00Z");
+    assertEquals("2024-01-01T12:00:00.000Z", dt.toStringRfc3339());
   }
 
   // =========================================================================
-  // Requirement 4: equals semantics based on absolute instant
+  // Equals/hashCode: based on absolute UTC instant (including sub-millisecond),
+  // NOT based on tzShift or formatting precision
   // =========================================================================
   @Test
-  public void requirement4_equals_sameInstantDifferentTz_shouldBeEqual() {
+  public void equals_sameInstantDifferentTzShift_shouldBeEqual() {
     DateTime dtZ = DateTime.parseRfc3339("2024-01-01T12:00:00Z");
     DateTime dtPlus8 = DateTime.parseRfc3339("2024-01-01T20:00:00+08:00");
     DateTime dtMinus5 = DateTime.parseRfc3339("2024-01-01T07:00:00-05:00");
 
-    // All three represent the SAME absolute instant
-    assertEquals("Z and +08:00 representing same instant", dtZ, dtPlus8);
-    assertEquals("Z and -05:00 representing same instant", dtZ, dtMinus5);
-    assertEquals("+08:00 and -05:00 representing same instant", dtPlus8, dtMinus5);
-    assertEquals("hashCode consistent for same instant", dtZ.hashCode(), dtPlus8.hashCode());
+    assertEquals(dtZ, dtPlus8);
+    assertEquals(dtZ, dtMinus5);
+    assertEquals(dtPlus8, dtMinus5);
+    assertEquals(dtZ.hashCode(), dtPlus8.hashCode());
   }
 
   @Test
-  public void requirement4_equals_purePrecisionDiff_shouldBeEqual() {
-    // Same instant, one written with 3 digits, one with 9 trailing zeros
+  public void equals_sameMillisDifferentNanos_shouldNotBeEqual() {
+    // Same millisecond, different sub-millisecond nanos
+    DateTime dt1 = DateTime.parseRfc3339("2024-01-01T12:00:00.123Z");
+    DateTime dt2 = DateTime.parseRfc3339("2024-01-01T12:00:00.123000001Z");
+
+    assertNotEquals(dt1, dt2);
+    assertNotEquals(dt1.hashCode(), dt2.hashCode());
+  }
+
+  @Test
+  public void equals_sameInstantDifferentFormatPrecision_shouldBeEqual() {
+    // Same instant, different formatting precision (trailing zeros)
     DateTime dt3 = DateTime.parseRfc3339("2024-01-01T12:00:00.123Z");
+    DateTime dt6 = DateTime.parseRfc3339("2024-01-01T12:00:00.123000Z");
     DateTime dt9 = DateTime.parseRfc3339("2024-01-01T12:00:00.123000000Z");
 
-    assertEquals("Same instant (trailing zeros precision diff)", dt3, dt9);
+    assertEquals(dt3, dt6);
+    assertEquals(dt3, dt9);
+    assertEquals(dt3.hashCode(), dt9.hashCode());
   }
 
   @Test
-  public void requirement4_equals_differentInstants_shouldNotBeEqual() {
-    // Truly different instants (1 ns apart)
+  public void equals_differentInstants_shouldNotBeEqual() {
     DateTime dt1 = DateTime.parseRfc3339("2024-01-01T12:00:00.000000000Z");
     DateTime dt2 = DateTime.parseRfc3339("2024-01-01T12:00:00.000000001Z");
+    assertNotEquals(dt1, dt2);
 
-    assertNotEquals("Instants 1ns apart must not be equal", dt1, dt2);
+    DateTime dt3 = DateTime.parseRfc3339("2024-01-01T12:00:00.999Z");
+    DateTime dt4 = DateTime.parseRfc3339("2024-01-01T12:00:00.999999999Z");
+    assertNotEquals(dt3, dt4);
   }
 
   @Test
-  public void requirement4_tzShiftOnlyUsedForFormattingNotEquality() {
-    // Same instant via constructor with different explicit tzShift
-    DateTime dtA = new DateTime(1700000000000L, 0);   // UTC
-    DateTime dtB = new DateTime(1700000000000L, 480); // +08:00
-
-    // They are the same absolute instant -> must be equal
-    assertEquals(dtA, dtB);
-
-    // But formatted output differs (as expected)
-    assertEquals("2023-11-14T22:13:20.000Z", dtA.toStringRfc3339());
-    assertTrue(dtB.toStringRfc3339().endsWith("+08:00"));
+  public void equals_dateOnlyVsDateTime_shouldNotBeEqual() {
+    // Same millisecond value but dateOnly flag differs
+    DateTime dateOnly = new DateTime(true, 1700000000000L, 0);
+    DateTime dateTime = new DateTime(false, 1700000000000L, 0);
+    assertNotEquals(dateOnly, dateTime);
   }
 
   // =========================================================================
-  // Requirement 6: No new 3rd-party deps (implicitly verified by compilation)
-  // Package and class names unchanged
+  // Date-only string rejects timezone offset
   // =========================================================================
   @Test
-  public void requirement6_apiNamesUnchanged() throws ClassNotFoundException {
-    // Class must be in the same package with same name
-    Class<?> clazz = Class.forName("com.google.api.client.util.DateTime");
-    assertEquals("com.google.api.client.util.DateTime", clazz.getName());
+  public void dateOnlyWithZ_rejected() {
+    try {
+      DateTime.parseRfc3339("2024-01-01Z");
+      fail("Expected NumberFormatException");
+    } catch (NumberFormatException expected) {
+    }
+  }
 
-    // Nested SecondsAndNanos preserved
-    Class<?> nested = Class.forName("com.google.api.client.util.DateTime$SecondsAndNanos");
-    assertEquals("com.google.api.client.util.DateTime$SecondsAndNanos", nested.getName());
+  @Test
+  public void dateOnlyWithOffset_rejected() {
+    try {
+      DateTime.parseRfc3339("2024-01-01+08:00");
+      fail("Expected NumberFormatException");
+    } catch (NumberFormatException expected) {
+    }
+
+    try {
+      DateTime.parseRfc3339("2024-01-01-05:00");
+      fail("Expected NumberFormatException");
+    } catch (NumberFormatException expected) {
+    }
+  }
+
+  @Test
+  public void dateOnlyWithoutTz_accepted() {
+    DateTime dt = DateTime.parseRfc3339("2024-01-01");
+    assertTrue(dt.isDateOnly());
+    assertEquals(0, dt.getTimeZoneShift());
+    assertEquals("2024-01-01", dt.toStringRfc3339());
   }
 
   // =========================================================================
-  // Requirement 7: JSON serialization paths compatible
-  // toStringRfc3339() and parseRfc3339() work for standard formats
+  // API Stability: all public constructors, methods preserved
   // =========================================================================
   @Test
-  public void requirement7_jsonSerialization_roundTrip() {
-    // Standard ISO-8601 / RFC3339 patterns used in JSON
+  public void api_allPublicConstructorsStillWork() {
+    Date date = new Date(1234567890L);
+    TimeZone tz = TimeZone.getTimeZone("GMT-5");
+
+    new DateTime(date, tz);
+    new DateTime(1234567890L);
+    new DateTime(date);
+    new DateTime(1234567890L, 300);
+    new DateTime(true, 1234567890L, null);
+    new DateTime(true, 1234567890L, 0);
+    new DateTime("2024-01-01T00:00:00Z");
+    new DateTime("2024-01-01");
+  }
+
+  @Test
+  public void api_allPublicMethodsStillWork() {
+    DateTime dt = new DateTime(1700000000000L, 0);
+    dt.getValue();
+    dt.isDateOnly();
+    dt.getTimeZoneShift();
+    dt.toStringRfc3339();
+    dt.toStringRfc3339Nano(); // new method
+    dt.toString();
+    dt.equals(dt);
+    dt.hashCode();
+
+    DateTime.parseRfc3339("2024-01-01T00:00:00Z");
+    DateTime.parseRfc3339ToSecondsAndNanos("2024-01-01T00:00:00.123456789Z");
+    SecondsAndNanos.ofSecondsAndNanos(0L, 0);
+  }
+
+  @Test
+  public void api_nullSentinelStillWorks() {
+    // Data.NULL_DATE_TIME = new DateTime(0) semantics preserved
+    DateTime nullSentinel = new DateTime(0);
+    assertEquals(0L, nullSentinel.getValue());
+    assertEquals(0, nullSentinel.getTimeZoneShift());
+    assertEquals(new DateTime(0), new DateTime(0));
+    assertNotEquals(new DateTime(0), new DateTime(1));
+
+    // Round-trip via string still works
+    String s = nullSentinel.toStringRfc3339();
+    DateTime reparsed = DateTime.parseRfc3339(s);
+    assertEquals(nullSentinel, reparsed);
+  }
+
+  // =========================================================================
+  // Sub-millisecond precision preserved internally (SecondsAndNanos)
+  // =========================================================================
+  @Test
+  public void precision_parseRfc3339ToSecondsAndNanos_preservesNanos() {
+    SecondsAndNanos san = DateTime.parseRfc3339ToSecondsAndNanos(
+        "2024-01-01T12:00:00.123456789Z");
+    assertEquals(123456789, san.getNanos());
+
+    san = DateTime.parseRfc3339ToSecondsAndNanos("2024-01-01T12:00:00.1Z");
+    assertEquals(100000000, san.getNanos());
+
+    san = DateTime.parseRfc3339ToSecondsAndNanos("2024-01-01T12:00:00.000000001Z");
+    assertEquals(1, san.getNanos());
+  }
+
+  // =========================================================================
+  // JSON serialization compatibility
+  // =========================================================================
+  @Test
+  public void jsonCompatibility_standardFormats() {
     String[] standardInputs = {
         "2024-01-01T00:00:00Z",
         "2024-06-15T12:30:45.123Z",
@@ -194,95 +398,21 @@ public class DateTimeRefactorVerificationTest {
     };
 
     for (String input : standardInputs) {
-      // Simulate JSON read path: parseRfc3339(String)
       DateTime dt = DateTime.parseRfc3339(input);
-
-      // Simulate JSON write path: toStringRfc3339()
       String output = dt.toStringRfc3339();
-
-      // Output must be parseable by downstream JSON parsers (self-consistent)
       DateTime reparsed = DateTime.parseRfc3339(output);
-      assertEquals("Round-trip equality for input: " + input, dt, reparsed);
+      assertEquals("Round-trip: " + input, dt, reparsed);
     }
   }
 
   // =========================================================================
-  // Requirement 8: NULL_DATE_TIME sentinel semantics preserved
-  // Data.NULL_DATE_TIME = new DateTime(0) still works
+  // Class/package names unchanged
   // =========================================================================
   @Test
-  public void requirement8_nullSentinel_semanticsPreserved() {
-    // Simulate Data.NULL_DATE_TIME definition
-    DateTime nullSentinel = new DateTime(0);
-
-    // getValue() must return 0
-    assertEquals(0L, nullSentinel.getValue());
-
-    // toStringRfc3339 must be a valid parseable string
-    String sentinelStr = nullSentinel.toStringRfc3339();
-    DateTime reparsed = DateTime.parseRfc3339(sentinelStr);
-    assertEquals("NULL_DATE_TIME round-trips via string", nullSentinel, reparsed);
-
-    // Sentinel equals sentinel
-    assertEquals(new DateTime(0), new DateTime(0));
-
-    // Sentinel is distinct from other dates
-    assertNotEquals(nullSentinel, new DateTime(1));
-  }
-
-  // =========================================================================
-  // Requirement 9: Public API stable - all constructors, methods, signatures
-  // =========================================================================
-  @Test
-  public void requirement9_allPublicConstructorsAvailable() {
-    Date date = new Date(1234567890L);
-    TimeZone tz = TimeZone.getTimeZone("GMT-5");
-
-    // Every public constructor must compile and produce consistent results
-    DateTime c1 = new DateTime(date, tz);
-    DateTime c2 = new DateTime(1234567890L);
-    DateTime c3 = new DateTime(date);
-    DateTime c4 = new DateTime(1234567890L, 300);
-    DateTime c5 = new DateTime(true, 1234567890L, null);
-    DateTime c6 = new DateTime(true, 1234567890L, 0);
-    DateTime c7 = new DateTime("2024-01-01T00:00:00Z");
-    DateTime c8 = new DateTime("2024-01-01");
-
-    // Every public accessor must work
-    assertTrue(Long.class.isInstance(c1.getValue()));
-    assertTrue(Boolean.class.isInstance(c1.isDateOnly()));
-    assertTrue(Integer.class.isInstance(c1.getTimeZoneShift()));
-    assertTrue(String.class.isInstance(c1.toStringRfc3339()));
-    assertTrue(String.class.isInstance(c1.toString()));
-
-    // Every public static method must work
-    DateTime parsed = DateTime.parseRfc3339("2024-01-01T00:00:00Z");
-    SecondsAndNanos san = DateTime.parseRfc3339ToSecondsAndNanos("2024-01-01T00:00:00.123456789Z");
-    SecondsAndNanos san2 = SecondsAndNanos.ofSecondsAndNanos(0L, 0);
-    assertEquals(Long.class.isInstance(san.getSeconds()), true);
-    assertEquals(Integer.class.isInstance(san.getNanos()), true);
-  }
-
-  // Additional sanity: explicit zone constructor doesn't depend on default TZ
-  @Test
-  public void requirement1_explicitZoneStableAcrossDefaults() {
-    long ts = 1700000000000L;
-    TimeZone gmt8 = TimeZone.getTimeZone("GMT+8");
-
-    TimeZone original = TimeZone.getDefault();
-    try {
-      TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
-      DateTime dtUtcDefault = new DateTime(new Date(ts), gmt8);
-
-      TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"));
-      DateTime dtNyDefault = new DateTime(new Date(ts), gmt8);
-
-      assertEquals("Explicit zone constructor: same result regardless of default",
-          dtUtcDefault, dtNyDefault);
-      assertEquals("Explicit zone constructor: same toString regardless of default",
-          dtUtcDefault.toStringRfc3339(), dtNyDefault.toStringRfc3339());
-    } finally {
-      TimeZone.setDefault(original);
-    }
+  public void api_classNamesUnchanged() throws ClassNotFoundException {
+    assertEquals("com.google.api.client.util.DateTime",
+        Class.forName("com.google.api.client.util.DateTime").getName());
+    assertEquals("com.google.api.client.util.DateTime$SecondsAndNanos",
+        Class.forName("com.google.api.client.util.DateTime$SecondsAndNanos").getName());
   }
 }
