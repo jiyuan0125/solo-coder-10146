@@ -16,6 +16,7 @@ package com.google.api.client.util;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -91,14 +92,14 @@ public class DateTimeTest {
 
   @Test
   public void testEquals() throws InterruptedException {
-    assertFalse(
-        "Check equals with two different tz specified.",
+    assertTrue(
+        "Check equals with two different tz specified - same absolute moment should be equal regardless of timezone.",
         new DateTime(1234567890L).equals(new DateTime(1234567890L, 120)));
     assertTrue(
         "Check equals with two identical tz specified.",
         new DateTime(1234567890L, -240).equals(new DateTime(1234567890L, -240)));
-    assertFalse(
-        "Check equals with two different tz specified.",
+    assertTrue(
+        "Check equals with two different tz specified - same absolute moment should be equal regardless of timezone.",
         new DateTime(1234567890L, 60).equals(new DateTime(1234567890L, 240)));
 
     assertFalse("Check not equal.", new DateTime(1234567890L).equals(new DateTime(9876543210L)));
@@ -151,16 +152,16 @@ public class DateTimeTest {
         DateTime.parseRfc3339("2007-06-01t18:50:00-04:00").getValue(),
         DateTime.parseRfc3339("2007-06-01t22:50:00Z").getValue()); // from Section 4.2 Local Offsets
 
-    // Test truncating beyond millisecond precision.
-    assertEquals(
-        DateTime.parseRfc3339(
-            "2018-12-31T23:59:59.999999999Z"), // This value would be rounded up prior to version
-        // 1.30.2
-        DateTime.parseRfc3339("2018-12-31T23:59:59.999Z"));
-    assertEquals(
-        DateTime.parseRfc3339(
-            "2018-12-31T23:59:59.9999Z"), // This value would be truncated prior to version 1.30.2
-        DateTime.parseRfc3339("2018-12-31T23:59:59.999Z"));
+    // Test truncating beyond millisecond precision for getValue() - getValue() still returns milliseconds.
+    // However, the DateTime instances themselves represent different absolute moments.
+    DateTime dtFullNanos = DateTime.parseRfc3339("2018-12-31T23:59:59.999999999Z");
+    DateTime dtMillis = DateTime.parseRfc3339("2018-12-31T23:59:59.999Z");
+    assertEquals(dtFullNanos.getValue(), dtMillis.getValue()); // getValue() truncates to ms
+    assertNotEquals(dtFullNanos, dtMillis); // Different absolute moments
+
+    DateTime dt4Digits = DateTime.parseRfc3339("2018-12-31T23:59:59.9999Z");
+    assertEquals(dt4Digits.getValue(), dtMillis.getValue()); // getValue() truncates to ms
+    assertNotEquals(dt4Digits, dtMillis); // Different absolute moments
 
     // The beginning of Gregorian Calendar
     assertEquals(
@@ -258,16 +259,16 @@ public class DateTimeTest {
 
   @Test
   public void testParseAndFormatRfc3339() {
-    // .12 becomes .120
+    // .12 becomes .120 (padded to millisecond precision)
     String input = "1996-12-19T16:39:57.12-08:00";
     String expected = "1996-12-19T16:39:57.120-08:00";
     DateTime dt = DateTime.parseRfc3339(input);
     String output = dt.toStringRfc3339();
     assertEquals(expected, output);
 
-    // Truncated to milliseconds.
+    // Sub-millisecond precision preserved in formatted output.
     input = "1996-12-19T16:39:57.123456789-08:00";
-    expected = "1996-12-19T16:39:57.123-08:00";
+    expected = "1996-12-19T16:39:57.123456789-08:00";
     dt = DateTime.parseRfc3339(input);
     output = dt.toStringRfc3339();
     assertEquals(expected, output);
