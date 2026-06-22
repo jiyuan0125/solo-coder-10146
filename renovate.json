@@ -1,0 +1,98 @@
+{
+  "extends": [
+    "config:recommended",
+    ":separateMajorReleases",
+    ":combinePatchMinorReleases",
+    ":ignoreUnstable",
+    ":prImmediately",
+    ":updateNotScheduled",
+    ":automergeDisabled",
+    ":ignoreModulesAndTests",
+    ":maintainLockFilesDisabled"
+  ],
+  "ignorePaths": [
+    ".kokoro/requirements.txt"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": [
+        "^.kokoro/presubmit/graalvm-native.*.cfg$"
+      ],
+      "matchStrings": ["docker_image: \"us-docker.pkg.dev/java-graalvm-ci-prod/graalvm-integration-testing/graalvm.*:(?<currentValue>.*?)\""],
+      "depNameTemplate": "com.google.cloud:native-image-shared-config",
+      "datasourceTemplate": "maven"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackagePatterns": [
+        "^com.google.guava:"
+      ],
+      "versioning": "docker",
+      "enabled": false
+    },
+    {
+      "matchPackagePatterns": [
+        "*"
+      ],
+      "semanticCommitType": "deps",
+      "semanticCommitScope": null
+    },
+    {
+      "matchPackagePatterns": [
+        "^org.apache.maven",
+        "^org.jacoco:",
+        "^org.codehaus.mojo:",
+        "^org.sonatype.plugins:",
+        "^com.coveo:",
+        "^com.google.cloud:native-image-shared-config"
+      ],
+      "semanticCommitType": "build",
+      "semanticCommitScope": "deps",
+      "enabled": true
+    },
+    {
+      "matchPackagePatterns": [
+        "^com.google.http-client:google-http-client",
+        "^com.google.cloud:libraries-bom",
+        "^com.google.cloud.samples:shared-configuration"
+      ],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "matchPackagePatterns": [
+        "^junit:junit",
+        "^com.google.truth:truth",
+        "^org.mockito:mockito-core",
+        "^org.objenesis:objenesis",
+        "^com.google.cloud:google-cloud-conformance-tests"
+      ],
+      "semanticCommitType": "test",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "matchPackagePatterns": [
+        "^com.google.cloud:google-cloud-"
+      ],
+      "ignoreUnstable": false
+    },
+    {
+      "matchPackagePatterns": [
+        "^com.fasterxml.jackson.core"
+      ],
+      "groupName": "jackson dependencies"
+    },
+    {
+      "semanticCommitType": "deps",
+      "groupName": "gRPC dependencies",
+      "matchPackageNames": [
+        "/^io.grpc/"
+      ],
+      "enabled": false
+    }
+  ],
+  "semanticCommits": "enabled",
+  "dependencyDashboard": true
+}
